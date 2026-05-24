@@ -1,9 +1,9 @@
-import { createClient } from '@supabase/supabase-js';
+import { neon } from '@neondatabase/serverless';
 
-// Uses Vite environment variables. Replace placeholders in your .env file.
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://YOUR_SUPABASE_URL';
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'YOUR_ANON_KEY';
+// Vite only exposes env vars prefixed with VITE_.
+// For a browser app, keep this as a non-production placeholder or move DB access to a backend/serverless API.
+const DATABASE_URL = import.meta.env.VITE_DATABASE_URL || 'postgresql://USER:PASSWORD@HOST:5432/DB_NAME?sslmode=require';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const sql = neon(DATABASE_URL);
 
-export default supabase;
+export default sql;

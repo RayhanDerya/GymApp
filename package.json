@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "migrate": "node scripts/migrate.js"
   },
   "dependencies": {
+    "@neondatabase/serverless": "github:neondatabase/serverless",
     "@supabase/supabase-js": "^2.106.1",
     "date-fns": "^2.30.0",
     "lucide-react": "^0.292.0",

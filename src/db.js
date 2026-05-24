@@ -1,28 +1,29 @@
-import supabase from './supabaseClient';
+import sql from './supabaseClient';
 
 export async function fetchWorkouts() {
-  const { data, error } = await supabase
-    .from('workouts')
-    .select('*')
-    .order('inserted_at', { ascending: false });
+  const { data, error } = await sql`
+    SELECT * FROM workouts
+    ORDER BY inserted_at DESC
+  `;
   if (error) throw error;
   return data;
 }
 
 export async function saveWorkout(w) {
-  const { data, error } = await supabase
-    .from('workouts')
-    .insert([{ body_part: w.bodyPart, exercise: w.exercise, weight: w.weight, reps: w.reps, notes: w.notes }])
-    .select();
+  const { data, error } = await sql`
+    INSERT INTO workouts (body_part, exercise, weight, reps, notes)
+    VALUES (${w.bodyPart}, ${w.exercise}, ${w.weight}, ${w.reps}, ${w.notes})
+    RETURNING *
+  `;
   if (error) throw error;
-  return data[0];
+  return data;
 }
-
+  
 export async function fetchCustomExercises() {
-  const { data, error } = await supabase
-    .from('custom_exercises')
-    .select('*')
-    .order('created_at', { ascending: true });
+  const { data, error } = await sql`
+    SELECT * FROM custom_exercises
+    ORDER BY created_at ASC
+  `;
   if (error) throw error;
   const grouped = {};
   data.forEach(r => {
@@ -33,20 +34,21 @@ export async function fetchCustomExercises() {
 }
 
 export async function saveCustomExercise(bp, name) {
-  const { data, error } = await supabase
-    .from('custom_exercises')
-    .insert([{ body_part: bp, name }])
-    .select();
+  const { data, error } = await sql`
+    INSERT INTO custom_exercises (body_part, name)
+    VALUES (${bp}, ${name})
+    RETURNING *
+  `;
   if (error) throw error;
   return data[0];
 }
 
 export async function deleteCustomExerciseByName(bp, name) {
-  const { data, error } = await supabase
-    .from('custom_exercises')
-    .delete()
-    .match({ body_part: bp, name })
-    .select();
+  const { data, error } = await sql`
+    DELETE FROM custom_exercises
+    WHERE body_part = ${bp} AND name = ${name}
+    RETURNING *
+  `;
   if (error) throw error;
   return data;
 }
