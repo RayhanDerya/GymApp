@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { fetchWorkouts, saveWorkout, fetchCustomExercises, saveCustomExercise, deleteCustomExerciseByName } from './db';
+import { fetchWorkouts, saveWorkout, updateWorkout, deleteWorkoutById, fetchCustomExercises, saveCustomExercise, deleteCustomExerciseByName } from './db';
 import { format } from 'date-fns';
 import { Activity, Dumbbell, History, TrendingUp, TrendingDown, Minus, Edit2, Search } from 'lucide-react';
 
@@ -34,20 +34,53 @@ export default function App() {
   const [editingId, setEditingId] = useState(null);
   const [editFields, setEditFields] = useState({});
 
+  const getWorkoutDate = (workout) => workout.date || workout.inserted_at || new Date(0).toISOString();
+
+  const computeOverloadStatus = (previous, current) => {
+    if (!previous) return 'first_time';
+
+    const previousWeight = parseFloat(previous.weight);
+    const previousReps = parseInt(previous.reps);
+    const currentWeight = parseFloat(current.weight);
+    const currentReps = parseInt(current.reps);
+
+    if (currentWeight > previousWeight) return 'progress';
+    if (currentWeight === previousWeight && currentReps > previousReps) return 'progress';
+    if (currentWeight === previousWeight && currentReps === previousReps) return 'maintain';
+    return 'regress';
+  };
+
+  const decorateWorkouts = (items = []) => {
+    const chronological = [...items].sort((left, right) => new Date(getWorkoutDate(left)) - new Date(getWorkoutDate(right)));
+    const previousByExercise = {};
+
+    const decorated = chronological.map((workout) => {
+      const exerciseKey = String(workout.exercise || '').toLowerCase();
+      const previous = previousByExercise[exerciseKey];
+      previousByExercise[exerciseKey] = workout;
+      return {
+        ...workout,
+        overloadStatus: computeOverloadStatus(previous, workout)
+      };
+    });
+
+    return decorated.sort((left, right) => new Date(getWorkoutDate(right)) - new Date(getWorkoutDate(left)));
+  };
+
   useEffect(() => {
-    // Load from Supabase (falls back to existing localStorage on error)
+    // Load from Neon (falls back to existing localStorage on error)
     let mounted = true;
     (async () => {
       try {
         const ws = await fetchWorkouts();
         const ex = await fetchCustomExercises();
         if (!mounted) return;
-        setWorkouts(ws || []);
+        setWorkouts(decorateWorkouts(ws || []));
         setSavedExercises(ex.grouped || {});
       } catch (err) {
-        console.error('Supabase load failed, falling back to localStorage', err);
+        console.error('Neon load failed, falling back to localStorage', err);
         const saved = localStorage.getItem('gymProgressWorkouts');
-        if (saved) setWorkouts(JSON.parse(saved));
+        if (saved) setWorkouts(decorateWorkouts(JSON.parse(saved)));
         const s = localStorage.getItem('gymSavedExercises');
         if (s) setSavedExercises(JSON.parse(s));
       }
@@ -64,64 +97,42 @@ export default function App() {
     localStorage.setItem('gymSavedExercises', JSON.stringify(savedExercises));
   }, [savedExercises]);
 
-  const previousFor = (exerciseName) => {
-    return workouts.find(w => w.exercise.toLowerCase() === exerciseName.toLowerCase());
-  };
-
-  const computeStatus = (exerciseName, w, r) => {
-    const prev = previousFor(exerciseName);
-    if (!prev) return 'first_time';
-    const pWeight = parseFloat(prev.weight);
-    const pReps = parseInt(prev.reps);
-    const cWeight = parseFloat(w);
-    const cReps = parseInt(r);
-    if (cWeight > pWeight) return 'progress';
-    if (cWeight === pWeight && cReps > pReps) return 'progress';
-    if (cWeight === pWeight && cReps === pReps) return 'maintain';
-    return 'regress';
-  };
-
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!bodyPart || !exercise || !weight || !reps) return;
-    const overloadStatus = computeStatus(exercise, weight, reps);
     const newWorkout = {
       bodyPart,
       exercise,
       weight: parseFloat(weight),
       reps: parseInt(reps),
       notes: notes || '',
-      overloadStatus
+      date: new Date().toISOString()
     };
     try {
       const saved = await saveWorkout(newWorkout);
-      // saved contains fields from DB (id, inserted_at)
-      const mapped = {
-        id: saved.id || Date.now().toString(),
-        date: saved.inserted_at || new Date().toISOString(),
-        bodyPart: saved.body_part || saved.bodyPart,
-        exercise: saved.exercise,
-        weight: saved.weight,
-        reps: saved.reps,
-        notes: saved.notes || newWorkout.notes,
-        overloadStatus: newWorkout.overloadStatus
-      };
-      setWorkouts(prev => [mapped, ...prev]);
+      if (saved) setWorkouts(prev => decorateWorkouts([saved, ...prev]));
     } catch (err) {
       console.error('Save workout failed, storing locally', err);
       const mapped = {
         id: Date.now().toString(),
-        date: new Date().toISOString(),
         ...newWorkout
       };
-      setWorkouts(prev => [mapped, ...prev]);
+      setWorkouts(prev => decorateWorkouts([mapped, ...prev]));
     }
     setWeight('');
     setReps('');
     setNotes('');
   };
 
-  const deleteWorkout = (id) => setWorkouts(workouts.filter(w => w.id !== id));
+  const deleteWorkout = async (id) => {
+    try {
+      await deleteWorkoutById(id);
+      setWorkouts(prev => decorateWorkouts(prev.filter(w => w.id !== id)));
+    } catch (err) {
+      console.error('Delete workout failed, removing locally', err);
+      setWorkouts(prev => decorateWorkouts(prev.filter(w => w.id !== id)));
+    }
+  };
 
   const uniqueBodyParts = useMemo(() => [...new Set(workouts.map(w => w.bodyPart))], [workouts]);
   const uniqueExercises = useMemo(() => [...new Set(workouts.map(w => w.exercise))], [workouts]);
@@ -135,7 +146,6 @@ export default function App() {
     }
     return true;
   });
-
   // Helpers to get exercises for selected body part
   const exercisesForBodyPart = (bp) => {
     const defaults = DEFAULT_EXERCISES[bp] || [];
@@ -207,16 +217,24 @@ export default function App() {
     setEditFields({ bodyPart: hw.bodyPart, exercise: hw.exercise, weight: hw.weight, reps: hw.reps, notes: hw.notes });
   };
 
-  const saveEdit = (id) => {
-    setWorkouts(workouts.map(w => w.id === id ? {
-      ...w,
+  const saveEdit = async (id) => {
+    const updatedWorkout = {
       bodyPart: editFields.bodyPart,
       exercise: editFields.exercise,
       weight: parseFloat(editFields.weight),
       reps: parseInt(editFields.reps),
-      notes: editFields.notes,
-      overloadStatus: computeStatus(editFields.exercise, editFields.weight, editFields.reps)
-    } : w));
+      notes: editFields.notes || ''
+    };
+
+    try {
+      const saved = await updateWorkout(id, updatedWorkout);
+      if (saved) {
+        setWorkouts(prev => decorateWorkouts(prev.map(w => (w.id === id ? saved : w))));
+      }
+    } catch (err) {
+      console.error('Update workout failed, storing locally', err);
+      setWorkouts(prev => decorateWorkouts(prev.map(w => (w.id === id ? { ...w, ...updatedWorkout } : w))));
+    }
     setEditingId(null);
     setEditFields({});
   };
@@ -315,8 +333,8 @@ export default function App() {
                         {hw.overloadStatus === 'first_time' && <span className="inline-flex text-blue-600 bg-blue-50 px-2 py-1 rounded-lg text-xs sm:text-sm">Record</span>}
                       </div>
                       <div className="grid grid-cols-2 gap-2 mt-1">
-                        <button onClick={() => startEdit(hw)} className="w-full px-3 py-2 rounded-lg border text-xs sm:text-sm flex items-center justify-center gap-1"><Edit2 className="w-4 h-4"/> Edit</button>
-                        <button onClick={() => deleteWorkout(hw.id)} className="w-full px-3 py-2 rounded-lg border text-xs sm:text-sm text-red-600">Hapus</button>
+                        <button type="button" onClick={() => startEdit(hw)} className="w-full px-3 py-2 rounded-lg border text-xs sm:text-sm flex items-center justify-center gap-1"><Edit2 className="w-4 h-4"/> Edit</button>
+                        <button type="button" onClick={() => deleteWorkout(hw.id)} className="w-full px-3 py-2 rounded-lg border text-xs sm:text-sm text-red-600">Hapus</button>
                       </div>
                     </div>
                   </div>
