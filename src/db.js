@@ -35,32 +35,59 @@ export async function fetchWorkouts() {
 }
 
 export async function saveWorkout(w) {
-  const result = await sql`
-    INSERT INTO workouts (session_id, set_index, body_part, exercise, weight, reps, notes)
-    VALUES (${w.sessionId}, ${w.setIndex}, ${w.bodyPart}, ${w.exercise}, ${w.weight}, ${w.reps}, ${w.notes})
-    RETURNING *
-  `;
-  const { rows, error } = unwrapRows(result);
-  if (error) throw error;
-  return rows[0] ? mapWorkoutRow(rows[0]) : null;
+  try {
+    const result = await sql`
+      INSERT INTO workouts (session_id, set_index, body_part, exercise, weight, reps, notes)
+      VALUES (${w.sessionId}, ${w.setIndex}, ${w.bodyPart}, ${w.exercise}, ${w.weight}, ${w.reps}, ${w.notes})
+      RETURNING *
+    `;
+    const { rows, error } = unwrapRows(result);
+    if (error) throw error;
+    return rows[0] ? mapWorkoutRow(rows[0]) : null;
+  } catch (error) {
+    const result = await sql`
+      INSERT INTO workouts (body_part, exercise, weight, reps, notes)
+      VALUES (${w.bodyPart}, ${w.exercise}, ${w.weight}, ${w.reps}, ${w.notes})
+      RETURNING *
+    `;
+    const { rows, error: fallbackError } = unwrapRows(result);
+    if (fallbackError) throw fallbackError;
+    return rows[0] ? mapWorkoutRow(rows[0]) : null;
+  }
 }
 
 export async function updateWorkout(id, w) {
-  const result = await sql`
-    UPDATE workouts
-    SET body_part = ${w.bodyPart},
-        exercise = ${w.exercise},
-        weight = ${w.weight},
-        reps = ${w.reps},
-        notes = ${w.notes},
-        session_id = COALESCE(${w.sessionId}, session_id),
-        set_index = COALESCE(${w.setIndex}, set_index)
-    WHERE id = ${id}
-    RETURNING *
-  `;
-  const { rows, error } = unwrapRows(result);
-  if (error) throw error;
-  return rows[0] ? mapWorkoutRow(rows[0]) : null;
+  try {
+    const result = await sql`
+      UPDATE workouts
+      SET body_part = ${w.bodyPart},
+          exercise = ${w.exercise},
+          weight = ${w.weight},
+          reps = ${w.reps},
+          notes = ${w.notes},
+          session_id = COALESCE(${w.sessionId}, session_id),
+          set_index = COALESCE(${w.setIndex}, set_index)
+      WHERE id = ${id}
+      RETURNING *
+    `;
+    const { rows, error } = unwrapRows(result);
+    if (error) throw error;
+    return rows[0] ? mapWorkoutRow(rows[0]) : null;
+  } catch (error) {
+    const result = await sql`
+      UPDATE workouts
+      SET body_part = ${w.bodyPart},
+          exercise = ${w.exercise},
+          weight = ${w.weight},
+          reps = ${w.reps},
+          notes = ${w.notes}
+      WHERE id = ${id}
+      RETURNING *
+    `;
+    const { rows, error: fallbackError } = unwrapRows(result);
+    if (fallbackError) throw fallbackError;
+    return rows[0] ? mapWorkoutRow(rows[0]) : null;
+  }
 }
 
 export async function deleteWorkoutById(id) {
