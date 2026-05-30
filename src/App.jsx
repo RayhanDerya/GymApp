@@ -33,6 +33,9 @@ export default function App() {
 
   const [editingId, setEditingId] = useState(null);
   const [editFields, setEditFields] = useState({});
+  const [entryMode, setEntryMode] = useState('single');
+  const [bulkSetCount, setBulkSetCount] = useState(3);
+  const [manualSets, setManualSets] = useState([{ weight: '', reps: '', notes: '' }]);
 
   const getWorkoutDate = (workout) => workout.date || workout.inserted_at || new Date(0).toISOString();
 
@@ -52,20 +55,60 @@ export default function App() {
 
   const decorateWorkouts = (items = []) => {
     const chronological = [...items].sort((left, right) => new Date(getWorkoutDate(left)) - new Date(getWorkoutDate(right)));
-    const previousByExercise = {};
+    const groupedBySession = new Map();
 
-    const decorated = chronological.map((workout) => {
-      const exerciseKey = String(workout.exercise || '').toLowerCase();
-      const previous = previousByExercise[exerciseKey];
-      previousByExercise[exerciseKey] = workout;
+    chronological.forEach((workout) => {
+      const sessionKey = workout.sessionId || `legacy-${workout.id}`;
+      if (!groupedBySession.has(sessionKey)) {
+        groupedBySession.set(sessionKey, []);
+      }
+      groupedBySession.get(sessionKey).push(workout);
+    });
+
+    const sessions = Array.from(groupedBySession.entries()).map(([sessionKey, rows]) => {
+      const orderedRows = [...rows].sort((left, right) => (left.setIndex || 1) - (right.setIndex || 1));
+      const summary = orderedRows.reduce((best, row) => {
+        if (!best) return row;
+        const bestWeight = parseFloat(best.weight);
+        const rowWeight = parseFloat(row.weight);
+        const bestReps = parseInt(best.reps, 10);
+        const rowReps = parseInt(row.reps, 10);
+        if (rowWeight > bestWeight) return row;
+        if (rowWeight === bestWeight && rowReps > bestReps) return row;
+        return best;
+      }, null);
+      const volume = orderedRows.reduce((total, row) => total + (parseFloat(row.weight) * parseInt(row.reps, 10)), 0);
+
       return {
-        ...workout,
-        overloadStatus: computeOverloadStatus(previous, workout)
+        sessionKey,
+        sessionId: orderedRows[0].sessionId || null,
+        id: orderedRows[0].sessionId || orderedRows[0].id,
+        bodyPart: orderedRows[0].bodyPart,
+        exercise: orderedRows[0].exercise,
+        date: orderedRows[orderedRows.length - 1].date,
+        rows: orderedRows,
+        summary,
+        volume
       };
     });
 
-    return decorated.sort((left, right) => new Date(getWorkoutDate(right)) - new Date(getWorkoutDate(left)));
+    const previousByExercise = {};
+    const decoratedSessions = sessions
+      .sort((left, right) => new Date(getWorkoutDate(right)) - new Date(getWorkoutDate(left)))
+      .map((session) => {
+        const exerciseKey = String(session.exercise || '').toLowerCase();
+        const previous = previousByExercise[exerciseKey];
+        previousByExercise[exerciseKey] = session;
+        return {
+          ...session,
+          overloadStatus: computeOverloadStatus(previous?.summary, session.summary)
+        };
+      });
+
+    return decoratedSessions;
   };
+
+  const groupedWorkouts = useMemo(() => decorateWorkouts(workouts), [workouts]);
 
   useEffect(() => {
     // Load from Neon (falls back to existing localStorage on error)
@@ -75,12 +118,12 @@ export default function App() {
         const ws = await fetchWorkouts();
         const ex = await fetchCustomExercises();
         if (!mounted) return;
-        setWorkouts(decorateWorkouts(ws || []));
+        setWorkouts(ws || []);
         setSavedExercises(ex.grouped || {});
       } catch (err) {
         console.error('Neon load failed, falling back to localStorage', err);
         const saved = localStorage.getItem('gymProgressWorkouts');
-        if (saved) setWorkouts(decorateWorkouts(JSON.parse(saved)));
+        if (saved) setWorkouts(JSON.parse(saved));
         const s = localStorage.getItem('gymSavedExercises');
         if (s) setSavedExercises(JSON.parse(s));
       }
@@ -99,50 +142,103 @@ export default function App() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!bodyPart || !exercise || !weight || !reps) return;
-    const newWorkout = {
+    if (!bodyPart || !exercise) return;
+
+    const hasSingleSetValues = weight !== '' && reps !== '';
+    const hasBulkValues = weight !== '' && reps !== '' && bulkSetCount !== '';
+    const hasManualSets = manualSets.some(setRow => setRow.weight !== '' && setRow.reps !== '');
+
+    if (entryMode === 'single' && !hasSingleSetValues) return;
+    if (entryMode === 'bulk' && !hasBulkValues) return;
+    if (entryMode === 'manual' && !hasManualSets) return;
+
+    const sessionId = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    const basePayload = {
+      sessionId,
       bodyPart,
       exercise,
-      weight: parseFloat(weight),
-      reps: parseInt(reps),
-      notes: notes || '',
-      date: new Date().toISOString()
+      notes: notes || ''
     };
+
+    const workoutPayloads = [];
+
+    if (entryMode === 'bulk') {
+      const setTotal = Math.max(1, parseInt(bulkSetCount, 10) || 1);
+      for (let index = 1; index <= setTotal; index += 1) {
+        workoutPayloads.push({
+          ...basePayload,
+          setIndex: index,
+          weight: parseFloat(weight),
+          reps: parseInt(reps)
+        });
+      }
+    } else if (entryMode === 'manual') {
+      const validSets = manualSets.filter(setRow => setRow.weight !== '' && setRow.reps !== '');
+      validSets.forEach((setRow, index) => {
+        workoutPayloads.push({
+          ...basePayload,
+          setIndex: index + 1,
+          weight: parseFloat(setRow.weight),
+          reps: parseInt(setRow.reps, 10),
+          notes: setRow.notes || notes || ''
+        });
+      });
+    } else {
+      workoutPayloads.push({
+        ...basePayload,
+        setIndex: 1,
+        weight: parseFloat(weight),
+        reps: parseInt(reps, 10)
+      });
+    }
+
+    if (workoutPayloads.length === 0) return;
+
     try {
-      const saved = await saveWorkout(newWorkout);
-      if (saved) setWorkouts(prev => decorateWorkouts([saved, ...prev]));
+      const savedRows = [];
+      for (const payload of workoutPayloads) {
+        const saved = await saveWorkout(payload);
+        if (saved) savedRows.push(saved);
+      }
+      setWorkouts(prev => [...savedRows, ...prev]);
     } catch (err) {
       console.error('Save workout failed, storing locally', err);
-      const mapped = {
-        id: Date.now().toString(),
-        ...newWorkout
-      };
-      setWorkouts(prev => decorateWorkouts([mapped, ...prev]));
+      const mapped = workoutPayloads.map((payload, index) => ({
+        id: `${Date.now()}-${index}`,
+        date: new Date().toISOString(),
+        ...payload
+      }));
+      setWorkouts(prev => [...mapped, ...prev]);
     }
     setWeight('');
     setReps('');
     setNotes('');
+    setBulkSetCount(3);
+    setManualSets([{ weight: '', reps: '', notes: '' }]);
+    setEntryMode('single');
   };
 
   const deleteWorkout = async (id) => {
     try {
       await deleteWorkoutById(id);
-      setWorkouts(prev => decorateWorkouts(prev.filter(w => w.id !== id)));
+      setWorkouts(prev => prev.filter(w => w.id !== id));
     } catch (err) {
       console.error('Delete workout failed, removing locally', err);
-      setWorkouts(prev => decorateWorkouts(prev.filter(w => w.id !== id)));
+      setWorkouts(prev => prev.filter(w => w.id !== id));
     }
   };
 
   const uniqueBodyParts = useMemo(() => [...new Set(workouts.map(w => w.bodyPart))], [workouts]);
   const uniqueExercises = useMemo(() => [...new Set(workouts.map(w => w.exercise))], [workouts]);
 
-  const filtered = workouts.filter(w => {
-    if (filterBodyPart && w.bodyPart !== filterBodyPart) return false;
-    if (filterExercise && w.exercise !== filterExercise) return false;
+  const filtered = groupedWorkouts.filter(session => {
+    if (filterBodyPart && session.bodyPart !== filterBodyPart) return false;
+    if (filterExercise && session.exercise !== filterExercise) return false;
     if (search) {
       const s = search.toLowerCase();
-      if (!(`${w.exercise} ${w.bodyPart} ${w.notes}`.toLowerCase().includes(s))) return false;
+      const haystack = [session.exercise, session.bodyPart, ...session.rows.map(row => row.notes || '')].join(' ').toLowerCase();
+      if (!haystack.includes(s)) return false;
     }
     return true;
   });
@@ -214,7 +310,15 @@ export default function App() {
 
   const startEdit = (hw) => {
     setEditingId(hw.id);
-    setEditFields({ bodyPart: hw.bodyPart, exercise: hw.exercise, weight: hw.weight, reps: hw.reps, notes: hw.notes });
+    setEditFields({
+      bodyPart: hw.bodyPart,
+      exercise: hw.exercise,
+      weight: hw.weight,
+      reps: hw.reps,
+      notes: hw.notes,
+      sessionId: hw.sessionId || `legacy-${hw.id}`,
+      setIndex: hw.setIndex || 1
+    });
   };
 
   const saveEdit = async (id) => {
@@ -223,23 +327,48 @@ export default function App() {
       exercise: editFields.exercise,
       weight: parseFloat(editFields.weight),
       reps: parseInt(editFields.reps),
-      notes: editFields.notes || ''
+      notes: editFields.notes || '',
+      sessionId: editFields.sessionId,
+      setIndex: editFields.setIndex || 1
     };
 
     try {
       const saved = await updateWorkout(id, updatedWorkout);
       if (saved) {
-        setWorkouts(prev => decorateWorkouts(prev.map(w => (w.id === id ? saved : w))));
+        setWorkouts(prev => prev.map(w => (w.id === id ? saved : w)));
       }
     } catch (err) {
       console.error('Update workout failed, storing locally', err);
-      setWorkouts(prev => decorateWorkouts(prev.map(w => (w.id === id ? { ...w, ...updatedWorkout } : w))));
+      setWorkouts(prev => prev.map(w => (w.id === id ? { ...w, ...updatedWorkout } : w)));
     }
     setEditingId(null);
     setEditFields({});
   };
 
   const cancelEdit = () => { setEditingId(null); setEditFields({}); };
+
+  const updateManualSet = (index, field, value) => {
+    setManualSets(prev => prev.map((setRow, setIndex) => (
+      setIndex === index ? { ...setRow, [field]: value } : setRow
+    )));
+  };
+
+  const addManualSet = () => {
+    setManualSets(prev => [...prev, { weight: '', reps: '', notes: '' }]);
+  };
+
+  const removeManualSet = (index) => {
+    setManualSets(prev => prev.filter((_, setIndex) => setIndex !== index));
+  };
+
+  const resetWorkoutForm = () => {
+    setWeight('');
+    setReps('');
+    setNotes('');
+    setBulkSetCount(3);
+    setManualSets([{ weight: '', reps: '', notes: '' }]);
+    setEntryMode('single');
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white px-4 py-4 sm:px-6 sm:py-6 font-sans">
@@ -264,6 +393,12 @@ export default function App() {
               </div>
             </div>
 
+            <div className="grid grid-cols-3 gap-2 mb-3">
+              <button type="button" onClick={() => setEntryMode('single')} className={`px-3 py-2 rounded-xl border text-sm ${entryMode === 'single' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white'}`}>Single</button>
+              <button type="button" onClick={() => setEntryMode('bulk')} className={`px-3 py-2 rounded-xl border text-sm ${entryMode === 'bulk' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white'}`}>Bulk Sama</button>
+              <button type="button" onClick={() => setEntryMode('manual')} className={`px-3 py-2 rounded-xl border text-sm ${entryMode === 'manual' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white'}`}>Manual</button>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <select value={bodyPart} onChange={e => { setBodyPart(e.target.value); setExercise(''); }} className="w-full p-3 rounded-xl border bg-white text-sm">
                 {BODY_PARTS.map(bp => <option key={bp} value={bp}>{bp}</option>)}
@@ -283,14 +418,50 @@ export default function App() {
                   </div>
                 )}
               </div>
-              <input type="number" step="0.5" value={weight} onChange={e => setWeight(e.target.value)} placeholder="Beban (kg)" className="w-full p-3 rounded-xl border text-sm" />
-              <input type="number" value={reps} onChange={e => setReps(e.target.value)} placeholder="Repetisi" className="w-full p-3 rounded-xl border text-sm" />
-              <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Catatan (opsional)" className="w-full p-3 rounded-xl border text-sm sm:col-span-2" />
+
+              {entryMode === 'single' && (
+                <>
+                  <input type="number" step="0.5" value={weight} onChange={e => setWeight(e.target.value)} placeholder="Beban (kg)" className="w-full p-3 rounded-xl border text-sm" />
+                  <input type="number" value={reps} onChange={e => setReps(e.target.value)} placeholder="Repetisi" className="w-full p-3 rounded-xl border text-sm" />
+                  <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Catatan (opsional)" className="w-full p-3 rounded-xl border text-sm sm:col-span-2" />
+                </>
+              )}
+
+              {entryMode === 'bulk' && (
+                <>
+                  <input type="number" step="0.5" value={weight} onChange={e => setWeight(e.target.value)} placeholder="Beban (kg)" className="w-full p-3 rounded-xl border text-sm" />
+                  <input type="number" value={reps} onChange={e => setReps(e.target.value)} placeholder="Repetisi per set" className="w-full p-3 rounded-xl border text-sm" />
+                  <input type="number" min="1" value={bulkSetCount} onChange={e => setBulkSetCount(e.target.value)} placeholder="Jumlah set" className="w-full p-3 rounded-xl border text-sm" />
+                  <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Catatan (opsional)" className="w-full p-3 rounded-xl border text-sm sm:col-span-2" />
+                </>
+              )}
+
+              {entryMode === 'manual' && (
+                <div className="sm:col-span-2 space-y-3">
+                  <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Catatan sesi (opsional)" className="w-full p-3 rounded-xl border text-sm" />
+                  <div className="space-y-2">
+                    {manualSets.map((setRow, index) => (
+                      <div key={index} className="grid grid-cols-1 sm:grid-cols-4 gap-2 p-3 rounded-xl border bg-slate-50">
+                        <input type="number" step="0.5" value={setRow.weight} onChange={e => updateManualSet(index, 'weight', e.target.value)} placeholder="Beban (kg)" className="w-full p-3 rounded-xl border text-sm" />
+                        <input type="number" value={setRow.reps} onChange={e => updateManualSet(index, 'reps', e.target.value)} placeholder="Repetisi" className="w-full p-3 rounded-xl border text-sm" />
+                        <input value={setRow.notes} onChange={e => updateManualSet(index, 'notes', e.target.value)} placeholder="Catatan set" className="w-full p-3 rounded-xl border text-sm sm:col-span-2" />
+                        <div className="flex items-center gap-2 sm:col-span-4">
+                          <div className="text-xs text-gray-500">Set {index + 1}</div>
+                          {manualSets.length > 1 && (
+                            <button type="button" onClick={() => removeManualSet(index)} className="ml-auto px-3 py-2 rounded-xl border text-sm text-red-600">Hapus set</button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <button type="button" onClick={addManualSet} className="px-4 py-2 rounded-xl border text-sm bg-white">Tambah set</button>
+                </div>
+              )}
             </div>
 
             <div className="mt-3 flex flex-col sm:flex-row gap-2">
               <button className="w-full sm:w-auto bg-indigo-600 text-white px-4 py-3 rounded-xl shadow font-semibold text-sm">Simpan Set</button>
-              <button type="button" onClick={() => { setBodyPart(''); setExercise(''); setWeight(''); setReps(''); setNotes(''); }} className="w-full sm:w-auto px-4 py-3 rounded-xl border text-sm">Reset</button>
+              <button type="button" onClick={() => { setBodyPart(''); setExercise(''); resetWorkoutForm(); }} className="w-full sm:w-auto px-4 py-3 rounded-xl border text-sm">Reset</button>
             </div>
           </form>
 
@@ -313,29 +484,63 @@ export default function App() {
               <div className="text-center text-gray-400 py-8">Tidak ada data.</div>
             ) : (
               <div className="space-y-3">
-                {filtered.map(hw => (
-                  <div key={hw.id} className="p-3 sm:p-4 bg-slate-50 rounded-xl border flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs px-2 py-1 bg-white rounded-md border text-gray-700">{hw.bodyPart}</span>
-                        <h4 className="font-semibold text-sm sm:text-base break-words">{hw.exercise}</h4>
+                {filtered.map(session => (
+                  <div key={session.sessionKey} className="p-3 sm:p-4 bg-slate-50 rounded-xl border space-y-3">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs px-2 py-1 bg-white rounded-md border text-gray-700">{session.bodyPart}</span>
+                          <h4 className="font-semibold text-sm sm:text-base break-words">{session.exercise}</h4>
+                          <span className="text-xs px-2 py-1 rounded-md border bg-white text-gray-500">{session.rows.length} set</span>
+                          <span className="text-xs px-2 py-1 rounded-md border bg-white text-gray-500">Volume: {Math.round(session.volume)}</span>
+                        </div>
+                        <div className="text-xs sm:text-sm text-gray-500 mt-1">{format(new Date(session.date), 'dd MMM yyyy HH:mm')}</div>
                       </div>
-                      <div className="text-xs sm:text-sm text-gray-500 mt-1">{format(new Date(hw.date), 'dd MMM yyyy HH:mm')}</div>
-                      {hw.notes && <div className="mt-2 text-sm text-gray-600 break-words">Note: {hw.notes}</div>}
+
+                      <div className="text-left sm:text-right flex flex-col items-stretch sm:items-end gap-2">
+                        <div>
+                          {session.overloadStatus === 'progress' && <span className="inline-flex text-green-700 bg-green-100 px-2 py-1 rounded-lg text-xs sm:text-sm items-center gap-1"><TrendingUp className="w-4 h-4"/> Overload</span>}
+                          {session.overloadStatus === 'regress' && <span className="inline-flex text-red-600 bg-red-100 px-2 py-1 rounded-lg text-xs sm:text-sm items-center gap-1"><TrendingDown className="w-4 h-4"/> Turun</span>}
+                          {session.overloadStatus === 'maintain' && <span className="inline-flex text-gray-600 bg-gray-100 px-2 py-1 rounded-lg text-xs sm:text-sm items-center gap-1"><Minus className="w-4 h-4"/> Sama</span>}
+                          {session.overloadStatus === 'first_time' && <span className="inline-flex text-blue-600 bg-blue-50 px-2 py-1 rounded-lg text-xs sm:text-sm">Record</span>}
+                        </div>
+                      </div>
                     </div>
 
-                    <div className="text-left sm:text-right flex flex-col items-stretch sm:items-end gap-2">
-                      <div className="font-bold text-sm sm:text-base">{hw.weight} kg × {hw.reps}</div>
-                      <div>
-                        {hw.overloadStatus === 'progress' && <span className="inline-flex text-green-700 bg-green-100 px-2 py-1 rounded-lg text-xs sm:text-sm items-center gap-1"><TrendingUp className="w-4 h-4"/> Overload</span>}
-                        {hw.overloadStatus === 'regress' && <span className="inline-flex text-red-600 bg-red-100 px-2 py-1 rounded-lg text-xs sm:text-sm items-center gap-1"><TrendingDown className="w-4 h-4"/> Turun</span>}
-                        {hw.overloadStatus === 'maintain' && <span className="inline-flex text-gray-600 bg-gray-100 px-2 py-1 rounded-lg text-xs sm:text-sm items-center gap-1"><Minus className="w-4 h-4"/> Sama</span>}
-                        {hw.overloadStatus === 'first_time' && <span className="inline-flex text-blue-600 bg-blue-50 px-2 py-1 rounded-lg text-xs sm:text-sm">Record</span>}
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 mt-1">
-                        <button type="button" onClick={() => startEdit(hw)} className="w-full px-3 py-2 rounded-lg border text-xs sm:text-sm flex items-center justify-center gap-1"><Edit2 className="w-4 h-4"/> Edit</button>
-                        <button type="button" onClick={() => deleteWorkout(hw.id)} className="w-full px-3 py-2 rounded-lg border text-xs sm:text-sm text-red-600">Hapus</button>
-                      </div>
+                    <div className="space-y-2">
+                      {session.rows.map((setRow, index) => (
+                        <div key={setRow.id} className="bg-white rounded-xl border p-3 flex flex-col gap-3">
+                          {editingId === setRow.id ? (
+                            <div className="space-y-3">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <input value={editFields.bodyPart || ''} onChange={e => setEditFields({...editFields, bodyPart: e.target.value})} className="w-full p-3 border rounded-xl text-sm" />
+                                <input value={editFields.exercise || ''} onChange={e => setEditFields({...editFields, exercise: e.target.value})} className="w-full p-3 border rounded-xl text-sm" />
+                                <input value={editFields.weight || ''} onChange={e => setEditFields({...editFields, weight: e.target.value})} className="w-full p-3 border rounded-xl text-sm" />
+                                <input value={editFields.reps || ''} onChange={e => setEditFields({...editFields, reps: e.target.value})} className="w-full p-3 border rounded-xl text-sm" />
+                                <input value={editFields.notes || ''} onChange={e => setEditFields({...editFields, notes: e.target.value})} className="w-full p-3 border rounded-xl text-sm sm:col-span-2" />
+                              </div>
+                              <div className="flex flex-col sm:flex-row gap-2">
+                                <button type="button" onClick={() => saveEdit(setRow.id)} className="w-full sm:w-auto bg-indigo-600 text-white px-4 py-3 rounded-xl font-semibold text-sm">Simpan</button>
+                                <button type="button" onClick={cancelEdit} className="w-full sm:w-auto px-4 py-3 rounded-xl border text-sm">Batal</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="min-w-0">
+                                  <div className="font-medium text-sm">Set {setRow.setIndex || index + 1}</div>
+                                  <div className="text-sm text-gray-600">{setRow.weight} kg × {setRow.reps} reps</div>
+                                  {setRow.notes && <div className="text-xs text-gray-500 mt-1 break-words">{setRow.notes}</div>}
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 sm:w-auto">
+                                  <button type="button" onClick={() => startEdit(setRow)} className="w-full px-3 py-2 rounded-lg border text-xs sm:text-sm flex items-center justify-center gap-1"><Edit2 className="w-4 h-4"/> Edit</button>
+                                  <button type="button" onClick={() => deleteWorkout(setRow.id)} className="w-full px-3 py-2 rounded-lg border text-xs sm:text-sm text-red-600">Hapus</button>
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 ))}
@@ -343,7 +548,7 @@ export default function App() {
             )}
           </div>
 
-          {editingId && (
+          {false && editingId && (
             <div className="bg-white p-4 sm:p-5 rounded-2xl shadow">
               <h4 className="font-semibold mb-3 text-sm sm:text-base">Edit Entry</h4>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -354,8 +559,8 @@ export default function App() {
                 <input value={editFields.notes || ''} onChange={e => setEditFields({...editFields, notes: e.target.value})} className="w-full p-3 border rounded-xl text-sm sm:col-span-2" />
               </div>
               <div className="mt-3 flex flex-col sm:flex-row gap-2">
-                <button onClick={() => saveEdit(editingId)} className="w-full sm:w-auto bg-indigo-600 text-white px-4 py-3 rounded-xl font-semibold text-sm">Simpan</button>
-                <button onClick={cancelEdit} className="w-full sm:w-auto px-4 py-3 rounded-xl border text-sm">Batal</button>
+                <button type="button" onClick={() => saveEdit(editingId)} className="w-full sm:w-auto bg-indigo-600 text-white px-4 py-3 rounded-xl font-semibold text-sm">Simpan</button>
+                <button type="button" onClick={cancelEdit} className="w-full sm:w-auto px-4 py-3 rounded-xl border text-sm">Batal</button>
               </div>
             </div>
           )}

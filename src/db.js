@@ -14,6 +14,8 @@ function mapWorkoutRow(row) {
   return {
     id: row.id,
     date: row.inserted_at ?? row.date ?? null,
+    sessionId: row.session_id ?? row.sessionId ?? null,
+    setIndex: row.set_index ?? row.setIndex ?? 1,
     bodyPart: row.body_part ?? row.bodyPart,
     exercise: row.exercise,
     weight: row.weight,
@@ -34,8 +36,8 @@ export async function fetchWorkouts() {
 
 export async function saveWorkout(w) {
   const result = await sql`
-    INSERT INTO workouts (body_part, exercise, weight, reps, notes)
-    VALUES (${w.bodyPart}, ${w.exercise}, ${w.weight}, ${w.reps}, ${w.notes})
+    INSERT INTO workouts (session_id, set_index, body_part, exercise, weight, reps, notes)
+    VALUES (${w.sessionId}, ${w.setIndex}, ${w.bodyPart}, ${w.exercise}, ${w.weight}, ${w.reps}, ${w.notes})
     RETURNING *
   `;
   const { rows, error } = unwrapRows(result);
@@ -50,7 +52,9 @@ export async function updateWorkout(id, w) {
         exercise = ${w.exercise},
         weight = ${w.weight},
         reps = ${w.reps},
-        notes = ${w.notes}
+        notes = ${w.notes},
+        session_id = COALESCE(${w.sessionId}, session_id),
+        set_index = COALESCE(${w.setIndex}, set_index)
     WHERE id = ${id}
     RETURNING *
   `;

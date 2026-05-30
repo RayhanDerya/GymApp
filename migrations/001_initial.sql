@@ -4,6 +4,8 @@
 create table if not exists workouts (
   id bigint generated always as identity primary key,
   inserted_at timestamptz not null default now(),
+  session_id text not null,
+  set_index integer not null default 1,
   body_part text not null,
   exercise text not null,
   weight numeric not null,
