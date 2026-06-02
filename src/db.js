@@ -10,17 +10,34 @@ function unwrapRows(result) {
   return { rows: [], error: null };
 }
 
+function normalizeSets(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 function mapWorkoutRow(row) {
+  const sets = normalizeSets(row.sets);
   return {
     id: row.id,
     date: row.inserted_at ?? row.date ?? null,
     sessionId: row.session_id ?? row.sessionId ?? null,
-    setIndex: row.set_index ?? row.setIndex ?? 1,
     bodyPart: row.body_part ?? row.bodyPart,
     exercise: row.exercise,
     weight: row.weight,
     reps: row.reps,
     notes: row.notes ?? '',
+    sets,
+    setCount: row.set_count ?? row.setCount ?? sets.length,
+    volume: Number(row.volume ?? sets.reduce((total, setRow) => total + (parseFloat(setRow.weight) * parseInt(setRow.reps, 10)), 0)),
+    overloadStatus: row.overload_status ?? row.overloadStatus ?? 'first_time',
   };
 }
 
@@ -35,59 +52,35 @@ export async function fetchWorkouts() {
 }
 
 export async function saveWorkout(w) {
-  try {
-    const result = await sql`
-      INSERT INTO workouts (session_id, set_index, body_part, exercise, weight, reps, notes)
-      VALUES (${w.sessionId}, ${w.setIndex}, ${w.bodyPart}, ${w.exercise}, ${w.weight}, ${w.reps}, ${w.notes})
-      RETURNING *
-    `;
-    const { rows, error } = unwrapRows(result);
-    if (error) throw error;
-    return rows[0] ? mapWorkoutRow(rows[0]) : null;
-  } catch (error) {
-    const result = await sql`
-      INSERT INTO workouts (body_part, exercise, weight, reps, notes)
-      VALUES (${w.bodyPart}, ${w.exercise}, ${w.weight}, ${w.reps}, ${w.notes})
-      RETURNING *
-    `;
-    const { rows, error: fallbackError } = unwrapRows(result);
-    if (fallbackError) throw fallbackError;
-    return rows[0] ? mapWorkoutRow(rows[0]) : null;
-  }
+  const result = await sql`
+    INSERT INTO workouts (session_id, body_part, exercise, weight, reps, notes, sets, set_count, volume, overload_status)
+    VALUES (${w.sessionId}, ${w.bodyPart}, ${w.exercise}, ${w.weight}, ${w.reps}, ${w.notes}, ${JSON.stringify(w.sets || [])}::jsonb, ${w.setCount}, ${w.volume}, ${w.overloadStatus || 'first_time'})
+    RETURNING *
+  `;
+  const { rows, error } = unwrapRows(result);
+  if (error) throw error;
+  return rows[0] ? mapWorkoutRow(rows[0]) : null;
 }
 
 export async function updateWorkout(id, w) {
-  try {
-    const result = await sql`
-      UPDATE workouts
-      SET body_part = ${w.bodyPart},
-          exercise = ${w.exercise},
-          weight = ${w.weight},
-          reps = ${w.reps},
-          notes = ${w.notes},
-          session_id = COALESCE(${w.sessionId}, session_id),
-          set_index = COALESCE(${w.setIndex}, set_index)
-      WHERE id = ${id}
-      RETURNING *
-    `;
-    const { rows, error } = unwrapRows(result);
-    if (error) throw error;
-    return rows[0] ? mapWorkoutRow(rows[0]) : null;
-  } catch (error) {
-    const result = await sql`
-      UPDATE workouts
-      SET body_part = ${w.bodyPart},
-          exercise = ${w.exercise},
-          weight = ${w.weight},
-          reps = ${w.reps},
-          notes = ${w.notes}
-      WHERE id = ${id}
-      RETURNING *
-    `;
-    const { rows, error: fallbackError } = unwrapRows(result);
-    if (fallbackError) throw fallbackError;
-    return rows[0] ? mapWorkoutRow(rows[0]) : null;
-  }
+  const result = await sql`
+    UPDATE workouts
+    SET body_part = ${w.bodyPart},
+        exercise = ${w.exercise},
+        weight = ${w.weight},
+        reps = ${w.reps},
+        notes = ${w.notes},
+        session_id = COALESCE(${w.sessionId}, session_id),
+        sets = ${JSON.stringify(w.sets || [])},
+        set_count = ${w.setCount},
+        volume = ${w.volume},
+        overload_status = ${w.overloadStatus || 'first_time'}
+    WHERE id = ${id}
+    RETURNING *
+  `;
+  const { rows, error } = unwrapRows(result);
+  if (error) throw error;
+  return rows[0] ? mapWorkoutRow(rows[0]) : null;
 }
 
 export async function deleteWorkoutById(id) {
