@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { fetchWorkouts, saveWorkout, updateWorkout, deleteWorkoutById, fetchCustomExercises, saveCustomExercise, deleteCustomExerciseByName } from './db';
 import { format } from 'date-fns';
-import { Activity, Dumbbell, TrendingUp, TrendingDown, Minus, Edit2, Search, BarChart3, CalendarDays, Flame, Layers3, ShieldCheck, Sparkles, TimerReset, Target, Award } from 'lucide-react';
+import { Activity, Dumbbell, TrendingUp, TrendingDown, Minus, Edit2, Search, BarChart3, CalendarDays, Flame, Layers3, ShieldCheck, Sparkles, TimerReset, Target, Award, History as HistoryIcon } from 'lucide-react';
 
 export default function App() {
   const [workouts, setWorkouts] = useState([]);
@@ -36,6 +36,8 @@ export default function App() {
   const [entryMode, setEntryMode] = useState('single');
   const [bulkSetCount, setBulkSetCount] = useState(3);
   const [manualSets, setManualSets] = useState([{ weight: '', reps: '', notes: '' }]);
+  const [activeBodyPartTab, setActiveBodyPartTab] = useState('');
+  const [activePage, setActivePage] = useState('workout');
 
   const getWorkoutDate = (workout) => workout.date || workout.inserted_at || new Date(0).toISOString();
 
@@ -379,6 +381,150 @@ export default function App() {
     };
   }, [groupedWorkouts]);
 
+  const dashboardByDay = useMemo(() => {
+    const map = new Map();
+
+    groupedWorkouts.forEach(session => {
+      const dayKey = format(new Date(session.date), 'yyyy-MM-dd');
+      if (!map.has(dayKey)) {
+        map.set(dayKey, {
+          dayKey,
+          date: new Date(session.date),
+          sessions: 0,
+          sets: 0,
+          volume: 0
+        });
+      }
+
+      const entry = map.get(dayKey);
+      entry.sessions += 1;
+      entry.sets += session.setCount || session.rows?.length || 0;
+      entry.volume += Number(session.volume || 0);
+      if (new Date(session.date) > entry.date) entry.date = new Date(session.date);
+    });
+
+    return Array.from(map.values()).sort((left, right) => right.date - left.date);
+  }, [groupedWorkouts]);
+
+  const weeklySeries = useMemo(() => {
+    const anchor = groupedWorkouts[0] ? new Date(groupedWorkouts[0].date) : new Date();
+    const anchorDay = new Date(anchor);
+    anchorDay.setHours(0, 0, 0, 0);
+
+    const byDay = new Map(dashboardByDay.map(day => [day.dayKey, day]));
+
+    return Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(anchorDay);
+      date.setDate(anchorDay.getDate() - (6 - index));
+      const dayKey = format(date, 'yyyy-MM-dd');
+      const day = byDay.get(dayKey);
+
+      return {
+        dayKey,
+        label: format(date, 'EEE'),
+        shortLabel: format(date, 'EEEEE'),
+        sessions: day?.sessions || 0,
+        volume: day?.volume || 0
+      };
+    });
+  }, [dashboardByDay, groupedWorkouts]);
+
+  const weeklyStreak = useMemo(() => {
+    let streak = 0;
+
+    for (let index = weeklySeries.length - 1; index >= 0; index -= 1) {
+      if (weeklySeries[index].sessions > 0 || weeklySeries[index].volume > 0) {
+        streak += 1;
+      } else {
+        break;
+      }
+    }
+
+    const activeDays = weeklySeries.filter(day => day.sessions > 0 || day.volume > 0).length;
+    const peakVolume = Math.max(...weeklySeries.map(day => day.volume), 1);
+
+    return { streak, activeDays, peakVolume };
+  }, [weeklySeries]);
+
+  const bodyPartProgress = useMemo(() => {
+    const map = new Map();
+
+    groupedWorkouts.forEach(session => {
+      const bodyPart = session.bodyPart || 'Unknown';
+      if (!map.has(bodyPart)) {
+        map.set(bodyPart, []);
+      }
+      map.get(bodyPart).push(session);
+    });
+
+    return Array.from(map.entries())
+      .map(([bodyPart, sessions]) => {
+        const orderedSessions = [...sessions].sort((left, right) => new Date(right.date) - new Date(left.date));
+        const latest = orderedSessions[0];
+        const previous = orderedSessions[1];
+        const totalSessions = orderedSessions.length;
+        const totalSets = orderedSessions.reduce((total, session) => total + (session.setCount || session.rows?.length || 0), 0);
+        const totalVolume = orderedSessions.reduce((total, session) => total + Number(session.volume || 0), 0);
+        const averageVolume = totalSessions > 0 ? totalVolume / totalSessions : 0;
+        const trend = computeOverloadStatus(previous?.summary, latest?.summary);
+
+        return {
+          bodyPart,
+          totalSessions,
+          totalSets,
+          totalVolume,
+          averageVolume,
+          latestExercise: latest?.exercise || '-',
+          latestDate: latest?.date || null,
+          trend
+        };
+      })
+      .sort((left, right) => right.totalVolume - left.totalVolume)
+      .slice(0, 5);
+  }, [groupedWorkouts]);
+
+  const weeklyVolumeTotal = weeklySeries.reduce((total, day) => total + Number(day.volume || 0), 0);
+
+  const weekComparison = useMemo(() => {
+    const anchor = groupedWorkouts[0] ? new Date(groupedWorkouts[0].date) : new Date();
+    const anchorDay = new Date(anchor);
+    anchorDay.setHours(0, 0, 0, 0);
+
+    const makeBucket = () => ({ volume: 0, sessions: 0, activeDays: new Set() });
+    const current = makeBucket();
+    const previous = makeBucket();
+
+    groupedWorkouts.forEach(session => {
+      const sessionDay = new Date(session.date);
+      sessionDay.setHours(0, 0, 0, 0);
+      const diffDays = Math.round((anchorDay - sessionDay) / 86400000);
+      const bucket = diffDays >= 0 && diffDays <= 6 ? current : diffDays >= 7 && diffDays <= 13 ? previous : null;
+
+      if (!bucket) return;
+
+      bucket.volume += Number(session.volume || 0);
+      bucket.sessions += 1;
+      bucket.activeDays.add(format(sessionDay, 'yyyy-MM-dd'));
+    });
+
+    return {
+      current,
+      previous,
+      deltaVolume: current.volume - previous.volume,
+      deltaSessions: current.sessions - previous.sessions,
+      deltaDays: current.activeDays.size - previous.activeDays.size,
+      volumeTrend: current.volume >= previous.volume ? 'up' : 'down'
+    };
+  }, [groupedWorkouts]);
+
+  useEffect(() => {
+    if (!activeBodyPartTab && bodyPartProgress.length > 0) {
+      setActiveBodyPartTab(bodyPartProgress[0].bodyPart);
+    }
+  }, [activeBodyPartTab, bodyPartProgress]);
+
+  const activeBodyPartProgress = bodyPartProgress.find(part => part.bodyPart === activeBodyPartTab) || bodyPartProgress[0] || null;
+
   const startEdit = (session) => {
     setEditingId(session.id);
     setEditFields({
@@ -467,6 +613,10 @@ export default function App() {
                 <p className="mt-2 max-w-2xl text-sm leading-relaxed text-white/80 sm:text-base">
                   Dashboard latihan yang fokus ke progres, volume, dan consistency. Lebih rapi, lebih informatif, lebih siap buat dipakai harian.
                 </p>
+                <div className="mt-4 inline-flex rounded-full border border-white/15 bg-white/10 p-1 text-sm backdrop-blur-md">
+                  <button type="button" onClick={() => setActivePage('workout')} className={`rounded-full px-4 py-2 font-semibold transition ${activePage === 'workout' ? 'bg-white text-slate-900 shadow-sm' : 'text-white/75 hover:text-white'}`}>Workout</button>
+                  <button type="button" onClick={() => setActivePage('analytics')} className={`rounded-full px-4 py-2 font-semibold transition ${activePage === 'analytics' ? 'bg-white text-slate-900 shadow-sm' : 'text-white/75 hover:text-white'}`}>Analytics</button>
+                </div>
               </div>
             </div>
 
@@ -508,31 +658,33 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-6">
-        <section className="xl:col-span-8 space-y-4 sm:space-y-6">
-          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4">
-            {[
-              { label: 'Sessions', value: dashboard.totalSessions, icon: Layers3, tone: 'from-sky-500 to-cyan-500' },
-              { label: 'Total sets', value: dashboard.totalSets, icon: Award, tone: 'from-emerald-500 to-teal-500' },
-              { label: 'Volume', value: Math.round(dashboard.totalVolume).toLocaleString('id-ID'), icon: Flame, tone: 'from-amber-500 to-orange-500' },
-              { label: 'Consistency', value: `${dashboard.activeDays} hari`, icon: ShieldCheck, tone: 'from-slate-700 to-slate-900' }
-            ].map(card => {
-              const Icon = card.icon;
-              return (
-                <div key={card.label} className="rounded-[1.4rem] border border-white/80 bg-white/85 p-4 shadow-[0_18px_50px_rgba(15,23,42,0.08)] backdrop-blur-md">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">{card.label}</div>
-                      <div className="mt-2 text-xl font-semibold text-slate-900 sm:text-2xl">{card.value}</div>
-                    </div>
-                    <div className={`flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br ${card.tone} text-white shadow-lg`}>
-                      <Icon className="h-5 w-5" />
+      <main className="max-w-7xl mx-auto grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-6 items-start">
+        <section className="order-2 xl:order-1 xl:col-span-8 space-y-4 sm:space-y-6">
+          {activePage === 'analytics' && (
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4">
+              {[
+                { label: 'Sessions', value: dashboard.totalSessions, icon: Layers3, tone: 'from-sky-500 to-cyan-500' },
+                { label: 'Total sets', value: dashboard.totalSets, icon: Award, tone: 'from-emerald-500 to-teal-500' },
+                { label: 'Volume', value: Math.round(dashboard.totalVolume).toLocaleString('id-ID'), icon: Flame, tone: 'from-amber-500 to-orange-500' },
+                { label: 'Consistency', value: `${dashboard.activeDays} hari`, icon: ShieldCheck, tone: 'from-slate-700 to-slate-900' }
+              ].map(card => {
+                const Icon = card.icon;
+                return (
+                  <div key={card.label} className="rounded-[1.4rem] border border-white/80 bg-white/85 p-4 shadow-[0_18px_50px_rgba(15,23,42,0.08)] backdrop-blur-md">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">{card.label}</div>
+                        <div className="mt-2 text-xl font-semibold text-slate-900 sm:text-2xl">{card.value}</div>
+                      </div>
+                      <div className={`flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br ${card.tone} text-white shadow-lg`}>
+                        <Icon className="h-5 w-5" />
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} className="overflow-hidden rounded-[1.75rem] border border-white/80 bg-white/90 shadow-[0_22px_70px_rgba(15,23,42,0.08)] backdrop-blur-md">
             <div className="flex flex-col gap-4 border-b border-slate-200/70 bg-[linear-gradient(180deg,rgba(248,250,252,0.95),rgba(255,255,255,0.92))] p-4 sm:p-5">
@@ -635,7 +787,7 @@ export default function App() {
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-                    <History className="h-3.5 w-3.5" />
+                    <HistoryIcon className="h-3.5 w-3.5" />
                     Workout history
                   </div>
                   <h3 className="mt-3 text-lg font-semibold tracking-tight text-slate-900 sm:text-xl">Riwayat latihan</h3>
@@ -738,61 +890,187 @@ export default function App() {
                   )}
         </section>
 
-                <aside className="space-y-4 xl:sticky xl:top-6 self-start xl:col-span-4">
-                  <div className="overflow-hidden rounded-[1.75rem] border border-white/80 bg-white/90 shadow-[0_22px_70px_rgba(15,23,42,0.08)] backdrop-blur-md">
-                    <div className="border-b border-slate-200/70 bg-[linear-gradient(180deg,rgba(248,250,252,0.95),rgba(255,255,255,0.92))] p-4 sm:p-5">
-                      <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-                        <BarChart3 className="h-3.5 w-3.5" />
-                        Intelligence panel
+                <aside className="order-1 xl:order-2 space-y-4 xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto xl:pr-2 self-start xl:col-span-4">
+                  {activePage === 'analytics' ? (
+                    <div className="overflow-hidden rounded-[1.75rem] border border-white/80 bg-white/90 shadow-[0_22px_70px_rgba(15,23,42,0.08)] backdrop-blur-md">
+                      <div className="border-b border-slate-200/70 bg-[linear-gradient(180deg,rgba(248,250,252,0.95),rgba(255,255,255,0.92))] p-4 sm:p-5">
+                        <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                          <BarChart3 className="h-3.5 w-3.5" />
+                          Intelligence panel
+                        </div>
+                        <h3 className="mt-3 text-lg font-semibold tracking-tight text-slate-900">Statistik & insight</h3>
                       </div>
-                      <h3 className="mt-3 text-lg font-semibold tracking-tight text-slate-900">Statistik & insight</h3>
-                    </div>
-                    <div className="space-y-4 p-4 sm:p-5">
-                      {Object.keys(stats).length === 0 ? (
-                        <div className="text-sm text-gray-500">Belum ada data.</div>
-                      ) : (
-                        <div className="space-y-3 text-sm max-h-64 overflow-auto pr-1">
-                          {Object.entries(stats).map(([ex, s]) => (
-                            <div key={ex} className="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 shadow-sm">
-                              <div className="flex flex-col gap-1">
-                                <div className="font-medium text-sm break-words text-slate-900">{ex}</div>
-                                <div className="text-xs text-slate-600">Best: {s.best} kg · Volume: {Math.round(s.volume)}</div>
+                      <div className="space-y-4 p-4 sm:p-5">
+                        {Object.keys(stats).length === 0 ? (
+                          <div className="text-sm text-gray-500">Belum ada data.</div>
+                        ) : (
+                          <div className="space-y-3 text-sm max-h-64 overflow-auto pr-1">
+                            {Object.entries(stats).map(([ex, s]) => (
+                              <div key={ex} className="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 shadow-sm">
+                                <div className="flex flex-col gap-1">
+                                  <div className="font-medium text-sm break-words text-slate-900">{ex}</div>
+                                  <div className="text-xs text-slate-600">Best: {s.best} kg · Volume: {Math.round(s.volume)}</div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                          <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-950 to-slate-800 p-4 text-white shadow-lg">
+                            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-white/70">
+                              <Sparkles className="h-4 w-4" />
+                              Weekly streak
+                            </div>
+                            <div className="mt-3 flex items-end justify-between gap-4">
+                              <div>
+                                <div className="text-3xl font-semibold leading-none">{weeklyStreak.streak}</div>
+                                <div className="mt-1 text-sm text-white/75">hari berturut-turut aktif</div>
+                              </div>
+                              <div className="text-right text-xs text-white/60">
+                                <div>{weeklyStreak.activeDays} aktif minggu ini</div>
+                                <div>{dashboard.totalSessions} sesi total</div>
                               </div>
                             </div>
-                          ))}
-                        </div>
-                      )}
-
-                      <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-950 to-slate-800 p-4 text-white shadow-lg">
-                        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-white/70">
-                          <Flame className="h-4 w-4" />
-                          Quick insight
-                        </div>
-                        <div className="mt-3 text-sm leading-relaxed text-white/80">
-                          Volume terbesar saat ini ada di <span className="font-semibold text-white">{dashboard.dominantBodyPart}</span>, dengan total <span className="font-semibold text-white">{dashboard.dominantBodyPartCount} sesi</span> tercatat.
-                        </div>
-                      </div>
-
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                        <h3 className="text-sm font-semibold text-slate-900">Recent sessions</h3>
-                        <div className="mt-3 space-y-2">
-                          {dashboard.recentSessions.length === 0 ? (
-                            <div className="text-sm text-slate-500">Belum ada sesi terbaru.</div>
-                          ) : dashboard.recentSessions.map(session => (
-                            <div key={`recent-${session.sessionKey}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                              <div className="text-sm font-medium text-slate-900">{session.exercise}</div>
-                              <div className="mt-1 text-xs text-slate-500">{session.bodyPart} · {format(new Date(session.date), 'dd MMM HH:mm')}</div>
+                            <div className="mt-4 flex items-center justify-between text-[11px] uppercase tracking-[0.14em] text-white/55">
+                              <span>Anchor week</span>
+                              <span>{weeklyVolumeTotal.toLocaleString('id-ID')} volume</span>
                             </div>
-                          ))}
+                          </div>
+
+                          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <h3 className="text-sm font-semibold text-slate-900">This week vs last week</h3>
+                                <p className="mt-1 text-xs text-slate-500">Perbandingan volume, sesi, dan active days.</p>
+                              </div>
+                              <div className={`rounded-full px-3 py-1 text-xs font-semibold ${weekComparison.volumeTrend === 'up' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-700 ring-1 ring-rose-200'}`}>
+                                {weekComparison.volumeTrend === 'up' ? 'Up' : 'Down'}
+                              </div>
+                            </div>
+
+                            <div className="mt-4 grid grid-cols-3 gap-2">
+                              <div className="rounded-2xl bg-slate-50 p-3">
+                                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Volume</div>
+                                <div className="mt-2 text-lg font-semibold text-slate-900">{Math.round(weekComparison.current.volume).toLocaleString('id-ID')}</div>
+                                <div className={`text-xs ${weekComparison.deltaVolume >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{weekComparison.deltaVolume >= 0 ? '+' : ''}{Math.round(weekComparison.deltaVolume).toLocaleString('id-ID')}</div>
+                              </div>
+                              <div className="rounded-2xl bg-slate-50 p-3">
+                                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Sessions</div>
+                                <div className="mt-2 text-lg font-semibold text-slate-900">{weekComparison.current.sessions}</div>
+                                <div className={`text-xs ${weekComparison.deltaSessions >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{weekComparison.deltaSessions >= 0 ? '+' : ''}{weekComparison.deltaSessions}</div>
+                              </div>
+                              <div className="rounded-2xl bg-slate-50 p-3">
+                                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Days</div>
+                                <div className="mt-2 text-lg font-semibold text-slate-900">{weekComparison.current.activeDays.size}</div>
+                                <div className={`text-xs ${weekComparison.deltaDays >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{weekComparison.deltaDays >= 0 ? '+' : ''}{weekComparison.deltaDays}</div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <h3 className="text-sm font-semibold text-slate-900">Weekly mini chart</h3>
+                                <p className="mt-1 text-xs text-slate-500">Volume harian dalam 7 hari terakhir.</p>
+                              </div>
+                              <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+                                Peak {Math.round(weeklyStreak.peakVolume).toLocaleString('id-ID')}
+                              </div>
+                            </div>
+                            <div className="mt-4 grid grid-cols-7 items-end gap-2">
+                              {weeklySeries.map(day => {
+                                const heightPercent = weeklyStreak.peakVolume > 0 ? Math.max((day.volume / weeklyStreak.peakVolume) * 100, day.volume > 0 ? 14 : 8) : 8;
+                                return (
+                                  <div key={day.dayKey} className="flex flex-col items-center gap-2">
+                                    <div className="flex h-28 w-full items-end rounded-2xl bg-slate-100 p-1.5">
+                                      <div
+                                        className={`w-full rounded-xl transition-all ${day.volume > 0 ? 'bg-gradient-to-t from-sky-500 to-indigo-400' : 'bg-slate-300'}`}
+                                        style={{ height: `${heightPercent}%` }}
+                                        title={`${day.label}: ${Math.round(day.volume)} volume`}
+                                      />
+                                    </div>
+                                    <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">{day.shortLabel}</div>
+                                    <div className="text-[10px] text-slate-400">{day.sessions}x</div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <h3 className="text-sm font-semibold text-slate-900">Body part tabs</h3>
+                              <p className="mt-1 text-xs text-slate-500">Pilih body part untuk melihat progress paling aktif.</p>
+                            </div>
+                            <div className="text-right text-xs text-slate-500">
+                              {dashboard.dominantBodyPart} terkuat
+                            </div>
+                          </div>
+                          <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
+                            {bodyPartProgress.length === 0 ? (
+                              <div className="text-sm text-slate-500">Belum ada ringkasan body part.</div>
+                            ) : bodyPartProgress.map(part => (
+                              <button
+                                key={part.bodyPart}
+                                type="button"
+                                onClick={() => setActiveBodyPartTab(part.bodyPart)}
+                                className={`shrink-0 rounded-full border px-3 py-2 text-xs font-semibold transition ${activeBodyPartTab === part.bodyPart ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
+                              >
+                                {part.bodyPart}
+                              </button>
+                            ))}
+                          </div>
+
+                          {activeBodyPartProgress && (
+                            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <div className="text-sm font-semibold text-slate-900">{activeBodyPartProgress.bodyPart}</div>
+                                  <div className="mt-1 text-xs text-slate-500">Latest: {activeBodyPartProgress.latestExercise}</div>
+                                </div>
+                                <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${activeBodyPartProgress.trend === 'progress' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : activeBodyPartProgress.trend === 'regress' ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200' : activeBodyPartProgress.trend === 'maintain' ? 'bg-slate-100 text-slate-600 ring-1 ring-slate-200' : 'bg-sky-50 text-sky-700 ring-1 ring-sky-200'}`}>
+                                  {activeBodyPartProgress.trend === 'progress' ? 'Naik' : activeBodyPartProgress.trend === 'regress' ? 'Turun' : activeBodyPartProgress.trend === 'maintain' ? 'Stabil' : 'Baru'}
+                                </span>
+                              </div>
+                              <div className="mt-4 grid grid-cols-3 gap-2">
+                                <div className="rounded-2xl bg-white p-3">
+                                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Sessions</div>
+                                  <div className="mt-2 text-lg font-semibold text-slate-900">{activeBodyPartProgress.totalSessions}</div>
+                                </div>
+                                <div className="rounded-2xl bg-white p-3">
+                                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Sets</div>
+                                  <div className="mt-2 text-lg font-semibold text-slate-900">{activeBodyPartProgress.totalSets}</div>
+                                </div>
+                                <div className="rounded-2xl bg-white p-3">
+                                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Volume</div>
+                                  <div className="mt-2 text-lg font-semibold text-slate-900">{Math.round(activeBodyPartProgress.totalVolume).toLocaleString('id-ID')}</div>
+                                </div>
+                              </div>
+                              <div className="mt-3 h-2 rounded-full bg-white ring-1 ring-slate-200">
+                                <div className="h-full rounded-full bg-gradient-to-r from-sky-500 to-indigo-500" style={{ width: `${dashboard.totalVolume > 0 ? Math.max((activeBodyPartProgress.totalVolume / dashboard.totalVolume) * 100, 6) : 0}%` }} />
+                              </div>
+                              <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+                                <span>{format(new Date(activeBodyPartProgress.latestDate), 'dd MMM HH:mm')}</span>
+                                <span>Avg {Math.round(activeBodyPartProgress.averageVolume).toLocaleString('id-ID')}</span>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
-
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                    </div>
+                  ) : (
+                    <div className="overflow-hidden rounded-[1.75rem] border border-white/80 bg-white/90 shadow-[0_22px_70px_rgba(15,23,42,0.08)] backdrop-blur-md">
+                      <div className="border-b border-slate-200/70 bg-[linear-gradient(180deg,rgba(248,250,252,0.95),rgba(255,255,255,0.92))] p-4 sm:p-5">
                         <h3 className="text-sm font-semibold text-slate-900">Settings — Gerakan Kustom</h3>
+                      </div>
+                      <div className="p-4 sm:p-5">
                         {Object.keys(savedExercises).length === 0 ? (
-                          <div className="mt-2 text-sm text-gray-500">Belum ada gerakan kustom.</div>
+                          <div className="text-sm text-gray-500">Belum ada gerakan kustom.</div>
                         ) : (
-                          <div className="mt-3 space-y-2 text-sm max-h-72 overflow-auto pr-1">
+                          <div className="space-y-2 text-sm max-h-72 overflow-auto pr-1">
                             {BODY_PARTS.map(bp => (
                               savedExercises[bp] && savedExercises[bp].length > 0 ? (
                                 <div key={bp} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
@@ -812,7 +1090,7 @@ export default function App() {
                         )}
                       </div>
                     </div>
-                  </div>
+                  )}
         </aside>
       </main>
     </div>
